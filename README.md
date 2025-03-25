@@ -19,5 +19,8 @@ Edit simple-pia-wg-config-generator.sh and replace
 "${PIA_PASS:=your_pia_password}"  # Replace with your password (e.g., xxxxxxxx)
 ```
 
+#### Changed in version 2 to generate one file per selected region and server 
++ in version 3 the script will test each server, if it is responsible to ping
+
 This script is based on PIA FOSS manual connections.
 https://github.com/pia-foss/manual-connections/tree/master
