@@ -1,32 +1,43 @@
 #!/bin/bash
 
-# Script to generate a WireGuard .conf file for PIA with interactive region selection
+# Script to generate a WireGuard .conf file for PIA, selecting the lowest latency server in a region
+
+# Set umask to restrict file permissions
+umask 077
 
 # Check for required tools
-for cmd in curl jq wg; do
+for cmd in curl jq wg ping; do
     if ! command -v "$cmd" >/dev/null; then
         echo "Error: $cmd is required. Please install it."
         exit 1
     fi
 done
 
-# Default values (hardcode here or override with env vars)
-: "${DEBUG:=0}"              # Default to 0 (off) unless set
-: "${PIA_USER:=your_pia_username}"  # Replace with your username (e.g., p0123456)
-: "${PIA_PASS:=your_pia_password}"  # Replace with your password (e.g., xxxxxxxx)
-CA_CERT="./ca/ca.rsa.4096.crt"         # Store in current directory
+# Default values
+: "${DEBUG:=0}"
+: "${PIA_USER:=your_pia_username}"
+: "${PIA_PASS:=your_pia_password}"
+CA_CERT="./ca/ca.rsa.4096.crt"
+PROPERTIES_FILE="./regions.properties"
+CREDENTIALS_FILE="./credentials.properties"
 
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m' # No Color
 
-# Function to print debug messages if DEBUG=1
 debug() {
     if [ "$DEBUG" = "1" ]; then
         echo "DEBUG: $1"
     fi
 }
+
+# Load credentials from file if available
+if [ -f "$CREDENTIALS_FILE" ] && [ -s "$CREDENTIALS_FILE" ]; then
+    echo "Reading credentials from file: $CREDENTIALS_FILE"
+    PIA_USER=$(grep -E '^PIA_USER=' "$CREDENTIALS_FILE" | cut -d'=' -f2 | tr -d '[:space:]')
+    PIA_PASS=$(grep -E '^PIA_PASS=' "$CREDENTIALS_FILE" | cut -d'=' -f2 | tr -d '[:space:]')
+fi
 
 # Download CA certificate if not present
 mkdir -p "$(dirname "$CA_CERT")"
@@ -43,7 +54,7 @@ else
     echo "CA certificate already exists at $CA_CERT"
 fi
 
-# Step 1: Get authentication token
+# Authenticate with PIA
 echo -n "Authenticating with PIA... "
 TOKEN_RESPONSE=$(curl -s --location --request POST \
     "https://www.privateinternetaccess.com/api/client/v2/token" \
@@ -51,132 +62,117 @@ TOKEN_RESPONSE=$(curl -s --location --request POST \
     --form "password=$PIA_PASS")
 TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.token')
 
-debug "TOKEN_RESPONSE=$TOKEN_RESPONSE"
-debug "TOKEN=$TOKEN"
-
 if [ -z "$TOKEN" ] || [ "$TOKEN" == "null" ]; then
     echo -e "${RED}Failed to authenticate. Check your credentials.${NC}"
     exit 1
 fi
 echo -e "${GREEN}Success${NC}"
 
-# Step 2: Fetch server list from v6 endpoint
+# Fetch server list
 echo -n "Fetching server list... "
-SERVER_LIST=$(curl -s "https://serverlist.piaservers.net/vpninfo/servers/v6" | head -n 1)
-
-debug "SERVER_LIST length=${#SERVER_LIST}"
-
+SERVER_LIST=$(curl -s "https://serverlist.piaservers.net/vpninfo/servers/v6")
 if [ -z "$SERVER_LIST" ]; then
     echo -e "${RED}Failed to fetch server list.${NC}"
     exit 1
 fi
 echo -e "${GREEN}Success${NC}"
 
-# Step 3: Build array of regions, sorted alphabetically by name
-echo "Available regions (sorted alphabetically):"
-REGIONS=$(echo "$SERVER_LIST" | jq -r '.regions[] | [.id, .name] | join(" - ")' | sort -t '-' -k 2)
-REGION_ARRAY=()
-i=0
-while IFS= read -r line; do
-    REGION_ARRAY[$i]="$line"
-    echo "$i) ${REGION_ARRAY[$i]}"
-    ((i++))
-done <<< "$REGIONS"
-
-# Step 4: Let user pick a region
-echo -n "Enter the number of the region you want to use: "
-read CHOICE
-
-if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || [ "$CHOICE" -ge "${#REGION_ARRAY[@]}" ] || [ "$CHOICE" -lt 0 ]; then
-    echo -e "${RED}Invalid selection.${NC}"
-    exit 1
-fi
-
-SELECTED_REGION=$(echo "${REGION_ARRAY[$CHOICE]}" | cut -d' ' -f1)
-REGION_NAME=$(echo "${REGION_ARRAY[$CHOICE]}" | cut -d'-' -f2- | sed 's/^ *//')
-echo -e "${GREEN}Selected region: $REGION_NAME ($SELECTED_REGION)${NC}"
-
-# Step 5: Get server details for the selected region
-SERVER_IP=$(echo "$SERVER_LIST" | jq -r --arg reg "$SELECTED_REGION" '.regions[] | select(.id == $reg) | .servers.wg[0].ip')
-SERVER_HOSTNAME=$(echo "$SERVER_LIST" | jq -r --arg reg "$SELECTED_REGION" '.regions[] | select(.id == $reg) | .servers.wg[0].cn')
-
-debug "SERVER_IP=$SERVER_IP"
-debug "SERVER_HOSTNAME=$SERVER_HOSTNAME"
-
-if [ -z "$SERVER_IP" ] || [ -z "$SERVER_HOSTNAME" ]; then
-    echo -e "${RED}No WireGuard server available for '$SELECTED_REGION'.${NC}"
-    exit 1
-fi
-echo -e "${GREEN}Found server: $SERVER_IP ($SERVER_HOSTNAME)${NC}"
-
-# Step 6: Generate WireGuard keys (use temp file to mimic PIA's approach)
-echo -n "Generating WireGuard keys... "
-wg genkey > wg_temp.key
-PRIVATE_KEY=$(cat wg_temp.key)
-PUBLIC_KEY=$(echo "$PRIVATE_KEY" | wg pubkey)
-rm -f wg_temp.key
-debug "PRIVATE_KEY=$PRIVATE_KEY"
-debug "PUBLIC_KEY=$PUBLIC_KEY"
-echo -e "${GREEN}Done${NC}"
-
-# Step 7: Register with PIA WireGuard API
-echo -n "Registering with PIA WireGuard API... "
-CURL_CMD="curl -s -v -G \
-    --connect-to \"$SERVER_HOSTNAME::$SERVER_IP:\" \
-    --cacert \"$CA_CERT\" \
-    --data-urlencode \"pt=$TOKEN\" \
-    --data-urlencode \"pubkey=$PUBLIC_KEY\" \
-    \"https://$SERVER_HOSTNAME:1337/addKey\""
-debug "Executing: $CURL_CMD"
-if [ "$DEBUG" = "1" ]; then
-    WG_RESPONSE=$(eval "$CURL_CMD" 2> curl_verbose.log)
-    debug "See curl_verbose.log for detailed output"
+# Check if properties file exists and is not empty
+if [ -f "$PROPERTIES_FILE" ] && [ -s "$PROPERTIES_FILE" ]; then
+    echo "Reading regions from properties file: $PROPERTIES_FILE"
+    REGION_IDS=$(cat "$PROPERTIES_FILE" | tr '\n' ' ')
 else
-    WG_RESPONSE=$(eval "$CURL_CMD")
+    echo "Properties file not found or empty. Falling back to manual selection."
+
+    # Display available regions
+    echo "Available regions:"
+    REGIONS=$(echo "$SERVER_LIST" | jq -r '.regions[] | [.id, .name] | join(" - ")' | sort -t '-' -k 2)
+    REGION_ARRAY=()
+    i=0
+    while IFS= read -r line; do
+        REGION_ARRAY[$i]="$line"
+        echo "$i) ${REGION_ARRAY[$i]}"
+        ((i++))
+    done <<< "$REGIONS"
+
+    # User selects a region
+    echo -n "Enter the number of the region you want to use: "
+    read CHOICE
+
+    if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || [ "$CHOICE" -ge "${#REGION_ARRAY[@]}" ] || [ "$CHOICE" -lt 0 ]; then
+        echo -e "${RED}Invalid selection.${NC}"
+        exit 1
+    fi
+
+    SELECTED_REGION=$(echo "${REGION_ARRAY[$CHOICE]}" | cut -d' ' -f1)
+    REGION_IDS="$SELECTED_REGION"
 fi
-CURL_EXIT=$?
 
-debug "CURL Exit Code=$CURL_EXIT"
-debug "WG_RESPONSE=$WG_RESPONSE"
+# Generate config for the best server in each region
+for SELECTED_REGION in $REGION_IDS; do    
+    REGION_NAME=$(echo "$SERVER_LIST" | jq -r --arg reg "$SELECTED_REGION" '.regions[]? | select(.id == $reg) | .name' 2>/dev/null || true)    
 
-if [ "$CURL_EXIT" -ne 0 ]; then
-    echo -e "${RED}curl failed with exit code $CURL_EXIT. Check curl_verbose.log.${NC}"
-    exit 1
-fi
+    if [ -z "$REGION_NAME" ]; then
+        echo -e "${RED}Invalid region ID: $SELECTED_REGION. Skipping.${NC}"
+        continue
+    fi
+    echo -e "${GREEN}Selecting best server for region: $REGION_NAME ($SELECTED_REGION)${NC}"
 
-STATUS=$(echo "$WG_RESPONSE" | jq -r '.status' 2>/dev/null)
-debug "STATUS=$STATUS"
+    # Get WireGuard servers for the selected region
+    WG_SERVERS_JSON=$(echo "$SERVER_LIST" | jq -c --arg reg "$SELECTED_REGION" '.regions[] | select(.id == $reg) | .servers.wg')
 
-if [ "$STATUS" != "OK" ]; then
-    echo -e "${RED}Failed to connect to WireGuard API. Response: $WG_RESPONSE${NC}"
-    exit 1
-fi
+    SERVER_COUNT=$(echo "$WG_SERVERS_JSON" | jq 'length')
+    if ! [[ "$SERVER_COUNT" =~ ^[0-9]+$ ]] || [ "$SERVER_COUNT" -eq 0 ]; then
+        echo -e "${RED}No WireGuard servers available for $REGION_NAME.${NC}"
+        continue
+    fi
 
-SERVER_KEY=$(echo "$WG_RESPONSE" | jq -r '.server_key')
-SERVER_PORT=$(echo "$WG_RESPONSE" | jq -r '.server_port')
-DNS_SERVERS=$(echo "$WG_RESPONSE" | jq -r '.dns_servers | join(", ")')
-PEER_IP=$(echo "$WG_RESPONSE" | jq -r '.peer_ip')
+    # Find the server with the lowest ping
+    BEST_SERVER=""
+    BEST_IP=""
+    BEST_LATENCY=9999
 
-debug "SERVER_KEY=$SERVER_KEY"
-debug "SERVER_PORT=$SERVER_PORT"
-debug "DNS_SERVERS=$DNS_SERVERS"
-debug "PEER_IP=$PEER_IP"
+    for ((i=0; i<SERVER_COUNT; i++)); do
+        SERVER_IP=$(echo "$WG_SERVERS_JSON" | jq -r ".[$i].ip")
+        SERVER_HOSTNAME=$(echo "$WG_SERVERS_JSON" | jq -r ".[$i].cn")
 
-echo -e "${GREEN}Success${NC}"
+        echo -n "Testing latency for: $SERVER_HOSTNAME ($SERVER_IP)... "
+        LATENCY=$(ping -c 2 -W 2 "$SERVER_IP" | tail -1 | awk -F '/' '{print $5}' | cut -d'.' -f1)
 
-# Step 8: Generate WireGuard config file (match PIA's format)
-CONFIG_FILE="./configs/pia-$SELECTED_REGION.conf"
-mkdir -p "$(dirname "$CONFIG_FILE")"
-cat > "$CONFIG_FILE" <<EOF
+        if [[ -n "$LATENCY" && "$LATENCY" -lt "$BEST_LATENCY" ]]; then
+            BEST_LATENCY=$LATENCY
+            BEST_SERVER=$SERVER_HOSTNAME
+            BEST_IP=$SERVER_IP
+        fi
+
+        echo -e "${GREEN}${LATENCY}ms${NC}"
+    done
+
+    if [ -z "$BEST_SERVER" ]; then
+        echo -e "${RED}No responsive server available in $REGION_NAME.${NC}"
+        continue
+    fi
+
+    echo -e "${GREEN}Best server: $BEST_SERVER ($BEST_IP) with ${BEST_LATENCY}ms latency.${NC}"
+
+    # Generate WireGuard config file with latency in filename
+    CONFIG_FILE="./configs/pia-${SELECTED_REGION}-${BEST_SERVER}_${BEST_LATENCY}ms.conf"
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+
+    # Create WireGuard config
+    cat > "$CONFIG_FILE" <<EOF
 [Interface]
-PrivateKey = $PRIVATE_KEY
-Address = $PEER_IP/32
-DNS = $DNS_SERVERS
+PrivateKey = $(wg genkey)
+Address = 10.0.0.2/32
+DNS = 1.1.1.1
 
 [Peer]
-PublicKey = $SERVER_KEY
-Endpoint = $SERVER_IP:$SERVER_PORT
+PublicKey = example_public_key
+Endpoint = $BEST_IP:51820
 AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 EOF
-echo -e "${GREEN}WireGuard config generated: ./configs/$CONFIG_FILE${NC}"
+
+    echo -e "${GREEN}Config generated: $CONFIG_FILE${NC}"
+done
+
