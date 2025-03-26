@@ -22,13 +22,6 @@ Added Server Responsiveness Check:
     The script now includes ping in the list of required tools.
     Before generating configuration files, it checks if the servers are responsive using ping.
 
-Lowest Latency Selection:
-    Instead of selecting any available server, the script now pings all available servers in a region.
-    The server with the lowest response time is chosen for the WireGuard configuration.
-
-Filename Update with Latency Info:
-    The generated .conf file now includes the ping response time in milliseconds, e.g., pia-austria-vienna401_8ms.conf.
-
 Credentials Handling Improvement:
     The script now reads PIA credentials from a file (credentials.properties) if available.
     If credentials are missing, it falls back to default values.
@@ -36,8 +29,15 @@ Credentials Handling Improvement:
 Improved Region Selection:
     The script allows for manual region selection or reads from a predefined regions.properties file.
 
-Debugging Enhancements:
-    Introduced a DEBUG mode that provides additional information if enabled.
+----
+WIP :
+
+Lowest Latency Selection:
+    Instead of selecting any available server, the script now pings all available servers in a region.
+    The server with the lowest response time is chosen for the WireGuard configuration.
+
+Filename Update with Latency Info:
+    The generated .conf file now includes the ping response time in milliseconds, e.g., pia-austria-vienna401_8ms.conf.
 
 
 Also thanks to @beilke for the contribution 
