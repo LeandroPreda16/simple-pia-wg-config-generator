@@ -29,9 +29,6 @@ Credentials Handling Improvement:
 Improved Region Selection:
     The script allows for manual region selection or reads from a predefined regions.properties file.
 
-----
-WIP :
-
 Lowest Latency Selection:
     Instead of selecting any available server, the script now pings all available servers in a region.
     The server with the lowest response time is chosen for the WireGuard configuration.
