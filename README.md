@@ -5,7 +5,7 @@ This script generates WireGuard configuration files for Private Internet Access 
 ## Installation
 
 ```bash
-git clone https://github.com/dieskim/simple-pia-wg-config-generator
+git clone https://github.com/LeandroPreda16/simple-pia-wg-config-generator
 cd simple-pia-wg-config-generator
 chmod +x simple-pia-wg-config-generator.sh
 DEBUG=1 PIA_USER=p0123456 PIA_PASS=xxxxxxxx ./simple-pia-wg-config-generator.sh
